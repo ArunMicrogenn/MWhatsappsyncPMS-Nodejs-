@@ -1,0 +1,8 @@
+{
+  "name": "WhatsApp Node.js & PHP Windows Service Generator",
+  "description": "Generate Windows Service wrappers, WinSW XML configurations, NSSM scripts, Node.js daemons, and package configurations for WhatsApp sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
