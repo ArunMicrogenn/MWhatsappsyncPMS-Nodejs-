@@ -1032,6 +1032,13 @@ ${syncRecursive ? `
  * Continuous background worker executing SQL Server ODBC / AISensy / Microgenn / Askeva synchronizations.
  */
 
+// CRITICAL for Windows Service on Windows 7/10/11: Fix current working directory
+try {
+  process.chdir(__dirname);
+} catch (e) {
+  // fallback
+}
+
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -1318,23 +1325,115 @@ async function httpPostJson(urlStr, data, headers = {}) {
   });
 }
 
-// ODBC Connection Helper
+// Dual Database Driver Helper (Supports both 'mssql' and 'odbc')
 let odbc = null;
+let mssql = null;
+
 try {
   odbc = require('odbc');
-} catch (e) {
-  writeLog(\`Notice: 'odbc' package not installed in node_modules. To enable live SQL Server ODBC queries, run: npm install odbc\`, 'WARN');
+} catch (e) {}
+
+try {
+  mssql = require('mssql');
+} catch (e) {}
+
+if (!odbc && !mssql) {
+  writeLog("Notice: Neither 'odbc' nor 'mssql' package found. Using simulation mode. Run: npm install mssql", 'WARN');
 }
 
-async function connectOdbc(connStr) {
-  if (odbc && odbc.connect) {
-    return await odbc.connect(connStr);
+async function connectDb(serverRaw, databaseRaw, userRaw, passwordRaw, odbcDriverName) {
+  const server = String(serverRaw || '').trim();
+  const database = String(databaseRaw || '').trim();
+  const user = String(userRaw || '').trim();
+  const password = String(passwordRaw || '').trim();
+
+  // 1. Prefer mssql (Pure JS, no C++ compilation required)
+  if (mssql) {
+    try {
+      let host = server;
+      let instanceName = undefined;
+      let port = undefined;
+
+      // Handle named instance (e.g. DESKTOP-VDGDM3P\SQLEXPRESS or .\SQLEXPRESS)
+      if (host.includes('\\')) {
+        const parts = host.split('\\');
+        host = parts[0];
+        instanceName = parts[1];
+      }
+
+      // Handle local aliases
+      if (host === '.' || host === '(local)' || host === '') {
+        host = 'localhost';
+      }
+
+      // Handle port (e.g. 192.168.1.100,1433 or 192.168.1.100:1433)
+      if (host.includes(',')) {
+        const pParts = host.split(',');
+        host = pParts[0];
+        port = parseInt(pParts[1], 10);
+      } else if (host.includes(':')) {
+        const pParts = host.split(':');
+        host = pParts[0];
+        port = parseInt(pParts[1], 10);
+      }
+
+      const config = {
+        server: host,
+        database: database,
+        user: user,
+        password: password,
+        port: port,
+        options: {
+          instanceName: instanceName,
+          encrypt: false,
+          enableArithAbort: true,
+          trustServerCertificate: true,
+          connectTimeout: 15000,
+          requestTimeout: 30000
+        }
+      };
+
+      const pool = new mssql.ConnectionPool(config);
+      await pool.connect();
+      return {
+        driver: 'mssql',
+        query: async (sqlQuery) => {
+          const req = pool.request();
+          const res = await req.query(sqlQuery);
+          return res.recordset || [];
+        },
+        close: async () => {
+          await pool.close().catch(() => {});
+        }
+      };
+    } catch (errMssql) {
+      writeLog(\`mssql connect error (\${server} / \${database}): \${errMssql.message}\`, 'WARN');
+    }
   }
+
+  // 2. Fallback to ODBC
+  if (odbc && odbc.connect) {
+    try {
+      const connStr = \`Driver=\${odbcDriverName || 'SQL Server Native Client 11.0'};Server=\${server};Database=\${database};Uid=\${user};Pwd=\${password};\`;
+      const handle = await odbc.connect(connStr);
+      return {
+        driver: 'odbc',
+        query: async (sqlQuery) => {
+          return await handle.query(sqlQuery);
+        },
+        close: async () => {
+          await handle.close().catch(() => {});
+        }
+      };
+    } catch (errOdbc) {
+      writeLog(\`odbc connect error (\${server} / \${database}): \${errOdbc.message}\`, 'WARN');
+    }
+  }
+
+  // 3. Fallback dummy
   return {
-    query: async (sql) => {
-      writeLog(\`[ODBC-QUERY] \${sql.substring(0, 100)}...\`, 'DEBUG');
-      return [];
-    },
+    driver: 'none',
+    query: async () => [],
     close: async () => {}
   };
 }
@@ -1384,14 +1483,13 @@ function getKolkataDateTime() {
 }
 
 async function runSyncCycle() {
-  writeLog(\`Connecting to SQL Server ODBC (\${myServer} / \${myDB})...\`, 'INFO');
-  const mainConnStr = \`Driver=\${odbcDriver};Server=\${myServer};Database=\${myDB};Uid=\${myUser};Pwd=\${myPass};\`;
+  writeLog(\`Connecting to SQL Server (\${myServer} / \${myDB})...\`, 'INFO');
   
   let dbhandle = null;
   try {
-    dbhandle = await connectOdbc(mainConnStr);
+    dbhandle = await connectDb(myServer, myDB, myUser, myPass, odbcDriver);
     const today = getKolkataDate();
-    writeLog(\`Executing sync cycle for date: \${today}\`, 'INFO');
+    writeLog(\`Executing sync cycle for date: \${today} [Driver: \${dbhandle.driver}]\`, 'INFO');
 
     // Fetch active companies / hotels
     const smsextra = \`select isnull(whatsappBusinessflag,0) as businessflag,
@@ -1420,8 +1518,7 @@ async function runSyncCycle() {
 
       let dbhandlein = null;
       try {
-        const hotelConnStr = \`Driver=\${odbcDriver};Server=\${myServerin};Database=\${myDBin};Uid=\${myUserin};Pwd=\${myPassin};\`;
-        dbhandlein = await connectOdbc(hotelConnStr);
+        dbhandlein = await connectDb(myServerin, myDBin, myUserin, myPassin, odbcDriver);
 
         // 1. AISensy Mode
         if (whatsappbusiness === "1" && whatsappflag === "0" && whatsappaskev === "0" && mwhatsapp === "0") {
@@ -1439,11 +1536,11 @@ async function runSyncCycle() {
           for (const hotel of (hotelList || [])) {
             const hcode = (hotel.HotelCode || '').trim();
             const checkRows = await dbhandlein.query(\`SELECT COUNT(*) AS cnt FROM whatsappcount_opening WHERE hotel_code = '\${hcode}' AND CAST(opdate AS date) = '\${today}'\`).catch(() => []);
-            const cnt = checkRows?.[0]?.cnt || 0;
+            const cnt = (checkRows && checkRows[0] && checkRows[0].cnt != null) ? checkRows[0].cnt : 0;
             if (cnt > 0) continue;
 
             const latestRows = await dbhandlein.query(\`SELECT TOP 1 opbal, clbal, opdate, hotel_code, property_name FROM whatsappcount_opening WHERE hotel_code = '\${hcode}' AND CAST(opdate AS date) < '\${today}' ORDER BY opdate DESC\`).catch(() => []);
-            const rowLatest = latestRows?.[0];
+            const rowLatest = (latestRows && latestRows[0]) ? latestRows[0] : null;
             if (rowLatest) {
               await dbhandlein.query(\`INSERT INTO whatsappcount_opening (opbal, clbal, opdate, todate, hotel_code, property_name) VALUES ('\${rowLatest.opbal}', '\${rowLatest.clbal}', '\${today}', '\${today}', '\${hcode}', '\${rowLatest.property_name}')\`).catch(() => {});
             }
@@ -1452,7 +1549,7 @@ async function runSyncCycle() {
           // Diagnostic check: Count total unsent records in outbox for this hotel
           const countPendingQuery = \`SET NOCOUNT ON; SELECT count(*) AS total_pending FROM outbox WHERE rtrim(HotelCode) = '\${Whatsapp_hotelcode}' AND isnull(whatsappsmsflg,0) = 0\`;
           const countDiag = await dbhandlein.query(countPendingQuery).catch(() => []);
-          const totalPending = countDiag?.[0]?.total_pending || 0;
+          const totalPending = (countDiag && countDiag[0] && countDiag[0].total_pending != null) ? countDiag[0].total_pending : 0;
           writeLog(\`[DIAGNOSTIC] Hotel \${Whatsapp_hotelcode}: Found \${totalPending} total pending unsent messages in Outbox\`, 'INFO');
 
           // Explicitly select needed columns with SET NOCOUNT ON to prevent ODBC LOB/buffer errors
@@ -1506,7 +1603,7 @@ async function runSyncCycle() {
 
           for (const rowob of (outboxRows || [])) {
             const openRows = await dbhandlein.query(\`SET NOCOUNT ON; SELECT clbal FROM whatsappcount_opening WHERE opdate = '\${today}' AND hotel_code = '\${Whatsapp_hotelcode}'\`).catch(() => []);
-            const clbal = Number(openRows?.[0]?.clbal || 0);
+            const clbal = Number((openRows && openRows[0] && openRows[0].clbal != null) ? openRows[0].clbal : 0);
 
             const templatename = String(rowob.smstemplateid || '').toLowerCase();
             const rawMob = String(rowob.MobileNumber || rowob.mobilenumber || '');
@@ -1611,7 +1708,7 @@ async function runSyncCycle() {
 
           for (const rowob of (outboxRows || [])) {
             const openRows = await dbhandlein.query(\`SET NOCOUNT ON; SELECT clbal FROM whatsappcount_opening WHERE opdate = '\${today}' AND hotel_code = '\${Whatsapp_hotelcode}'\`).catch(() => []);
-            const clbal = Number(openRows?.[0]?.clbal || 0);
+            const clbal = Number((openRows && openRows[0] && openRows[0].clbal != null) ? openRows[0].clbal : 0);
 
             const templatename = String(rowob.smstemplateid || '').toLowerCase();
             const rawMob = String(rowob.MobileNumber || rowob.mobilenumber || '');
@@ -1680,7 +1777,7 @@ async function runSyncCycle() {
 
           for (const rowob of (outboxRows || [])) {
             const openRows = await dbhandlein.query(\`SET NOCOUNT ON; SELECT clbal FROM whatsappcount_opening WHERE opdate = '\${today}' AND hotel_code = '\${Whatsapp_hotelcode}'\`).catch(() => []);
-            const clbal = Number(openRows?.[0]?.clbal || 0);
+            const clbal = Number((openRows && openRows[0] && openRows[0].clbal != null) ? openRows[0].clbal : 0);
 
             const templatename = String(rowob.smstemplateid || '').toLowerCase();
             const rawMob = String(rowob.MobileNumber || rowob.mobilenumber || '');
