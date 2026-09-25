@@ -1342,92 +1342,126 @@ if (!odbc && !mssql) {
 }
 
 async function connectDb(serverRaw, databaseRaw, userRaw, passwordRaw, odbcDriverName) {
-  const server = String(serverRaw || '').trim();
+  let server = String(serverRaw || '').trim();
   const database = String(databaseRaw || '').trim();
   const user = String(userRaw || '').trim();
   const password = String(passwordRaw || '').trim();
 
+  // Clean carriage returns, tabs, and spaces
+  server = server.replace(/[\r\n\t]/g, '').trim();
+
   // 1. Prefer mssql (Pure JS, no C++ compilation required)
   if (mssql) {
-    try {
-      let host = server;
-      let instanceName = undefined;
-      let port = undefined;
+    let host = server;
+    let instanceName = undefined;
+    let port = undefined;
 
-      // Handle named instance (e.g. DESKTOP-VDGDM3P\SQLEXPRESS or .\SQLEXPRESS)
-      if (host.includes('\\')) {
-        const parts = host.split('\\');
-        host = parts[0];
-        instanceName = parts[1];
+    // Handle named instance (e.g. JUMPSERVER\JUMPSQLEXPRESS or .\SQLEXPRESS or JUMPSERVER/JUMPSQLEXPRESS)
+    if (host.includes('\\\\')) {
+      const parts = host.split('\\\\');
+      host = parts[0];
+      instanceName = parts[1];
+    } else if (host.includes('/')) {
+      const parts = host.split('/');
+      host = parts[0];
+      instanceName = parts[1];
+    }
+
+    // Handle local aliases
+    if (host === '.' || host === '(local)' || host === '' || host.toLowerCase() === 'localhost') {
+      host = '127.0.0.1';
+    }
+
+    // Handle port (e.g. 192.168.1.100,1433 or 192.168.1.100:1433)
+    if (host.includes(',')) {
+      const pParts = host.split(',');
+      host = pParts[0];
+      port = parseInt(pParts[1], 10);
+    } else if (host.includes(':')) {
+      const pParts = host.split(':');
+      host = pParts[0];
+      port = parseInt(pParts[1], 10);
+    }
+
+    // Prepare connection strategies
+    const attempts = [];
+    if (instanceName) {
+      attempts.push({ server: host, instanceName: instanceName, port: port, desc: \`instance '\${instanceName}' on '\${host}'\` });
+      // Strategy 2: If instance resolution fails (e.g. SQL Browser service stopped), try default TCP port 1433
+      attempts.push({ server: host, instanceName: undefined, port: port || 1433, desc: \`direct TCP port \${port || 1433} on '\${host}'\` });
+    } else {
+      attempts.push({ server: host, instanceName: undefined, port: port || 1433, desc: \`port \${port || 1433} on '\${host}'\` });
+    }
+
+    for (const att of attempts) {
+      try {
+        const config = {
+          server: att.server,
+          database: database,
+          user: user,
+          password: password,
+          port: att.port,
+          options: {
+            instanceName: att.instanceName,
+            encrypt: false,
+            enableArithAbort: true,
+            trustServerCertificate: true,
+            connectTimeout: 12000,
+            requestTimeout: 30000
+          }
+        };
+
+        const pool = new mssql.ConnectionPool(config);
+        await pool.connect();
+        return {
+          driver: \`mssql (\${att.desc})\`,
+          query: async (sqlQuery) => {
+            const req = pool.request();
+            const res = await req.query(sqlQuery);
+            return res.recordset || [];
+          },
+          close: async () => {
+            await pool.close().catch(() => {});
+          }
+        };
+      } catch (errMssql) {
+        writeLog(\`mssql connect attempt via \${att.desc} failed: \${errMssql.message}\`, 'WARN');
       }
-
-      // Handle local aliases
-      if (host === '.' || host === '(local)' || host === '') {
-        host = 'localhost';
-      }
-
-      // Handle port (e.g. 192.168.1.100,1433 or 192.168.1.100:1433)
-      if (host.includes(',')) {
-        const pParts = host.split(',');
-        host = pParts[0];
-        port = parseInt(pParts[1], 10);
-      } else if (host.includes(':')) {
-        const pParts = host.split(':');
-        host = pParts[0];
-        port = parseInt(pParts[1], 10);
-      }
-
-      const config = {
-        server: host,
-        database: database,
-        user: user,
-        password: password,
-        port: port,
-        options: {
-          instanceName: instanceName,
-          encrypt: false,
-          enableArithAbort: true,
-          trustServerCertificate: true,
-          connectTimeout: 15000,
-          requestTimeout: 30000
-        }
-      };
-
-      const pool = new mssql.ConnectionPool(config);
-      await pool.connect();
-      return {
-        driver: 'mssql',
-        query: async (sqlQuery) => {
-          const req = pool.request();
-          const res = await req.query(sqlQuery);
-          return res.recordset || [];
-        },
-        close: async () => {
-          await pool.close().catch(() => {});
-        }
-      };
-    } catch (errMssql) {
-      writeLog(\`mssql connect error (\${server} / \${database}): \${errMssql.message}\`, 'WARN');
     }
   }
 
-  // 2. Fallback to ODBC
+  // 2. Fallback to ODBC with multi-driver auto-detection
   if (odbc && odbc.connect) {
-    try {
-      const connStr = \`Driver=\${odbcDriverName || 'SQL Server Native Client 11.0'};Server=\${server};Database=\${database};Uid=\${user};Pwd=\${password};\`;
-      const handle = await odbc.connect(connStr);
-      return {
-        driver: 'odbc',
-        query: async (sqlQuery) => {
-          return await handle.query(sqlQuery);
-        },
-        close: async () => {
-          await handle.close().catch(() => {});
-        }
-      };
-    } catch (errOdbc) {
-      writeLog(\`odbc connect error (\${server} / \${database}): \${errOdbc.message}\`, 'WARN');
+    const candidateDrivers = [];
+    if (odbcDriverName) candidateDrivers.push(odbcDriverName);
+    candidateDrivers.push('SQL Server Native Client 11.0');
+    candidateDrivers.push('SQL Server');
+    candidateDrivers.push('ODBC Driver 17 for SQL Server');
+    candidateDrivers.push('ODBC Driver 18 for SQL Server');
+    candidateDrivers.push('SQL Server Native Client 10.0');
+
+    const uniqueDrivers = Array.from(new Set(candidateDrivers.map(d => d.replace(/^{|}$/g, ''))));
+
+    for (const drv of uniqueDrivers) {
+      try {
+        const drvFormatted = drv.startsWith('{') ? drv : \`{\${drv}}\`;
+        const extraOpt = drv.includes('18') ? 'TrustServerCertificate=yes;' : '';
+        const connStr = \`Driver=\${drvFormatted};Server=\${server};Database=\${database};Uid=\${user};Pwd=\${password};\${extraOpt}\`;
+        const handle = await odbc.connect(connStr);
+        return {
+          driver: \`odbc (\${drv})\`,
+          query: async (sqlQuery) => {
+            return await handle.query(sqlQuery);
+          },
+          close: async () => {
+            await handle.close().catch(() => {});
+          }
+        };
+      } catch (errOdbc) {
+        // Next driver
+      }
     }
+    writeLog(\`odbc all driver connection attempts failed for server '\${server}' / db '\${database}'\`, 'WARN');
   }
 
   // 3. Fallback dummy
