@@ -1286,7 +1286,10 @@ function getPresignedUrl(objectKey) {
 async function httpPostJson(urlStr, data, headers = {}) {
   return new Promise((resolve, reject) => {
     try {
-      const parsed = urlModule.parse(urlStr);
+      if (!urlStr) {
+        throw new Error('URL string is missing or undefined');
+      }
+      const parsed = new URL(urlStr);
       const isHttps = parsed.protocol === 'https:';
       const client = isHttps ? https : http;
       const payloadStr = typeof data === 'string' ? data : JSON.stringify(data);
@@ -1295,7 +1298,7 @@ async function httpPostJson(urlStr, data, headers = {}) {
         protocol: parsed.protocol,
         hostname: parsed.hostname,
         port: parsed.port || (isHttps ? 443 : 80),
-        path: parsed.path,
+        path: parsed.pathname + parsed.search,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1348,7 +1351,7 @@ async function connectDb(serverRaw, databaseRaw, userRaw, passwordRaw, odbcDrive
   const password = String(passwordRaw || '').trim();
 
   // Clean carriage returns, tabs, and spaces
-  server = server.replace(/[\r\n\t]/g, '').trim();
+  server = server.replace(new RegExp('[\\r\\n\\t]', 'g'), '').trim();
 
   // 1. Prefer mssql (Pure JS, no C++ compilation required)
   if (mssql) {
@@ -1542,17 +1545,35 @@ async function runSyncCycle() {
       const whatsapp_access_token = rowex.whatsapp_access_token || '';
       const Whatsapp_MobileNo = rowex.Whatsapp_MobileNo || '';
       const Whatsapp_hotelcode = rowex.Hotelcode || rowex.HOTELCODE || '';
-      const whatsappbusiness = String(rowex.businessflag || '0');
-      const whatsappflag = String(rowex.whatsappflag || '0');
-      const whatsappaskev = String(rowex.whatsappaskev || '0');
-      const mwhatsapp = String(rowex.mwhatsapp || '0');
-      const whatsappaskev_token = rowex.whatsappaskev_token || '';
+      const whatsappbusiness = String(rowex.businessflag || rowex.whatsappBusinessflag || '0').trim();
+      const whatsappflag = String(rowex.whatsappflag || rowex.IsWhatsapp || '0').trim();
+      const whatsappaskev = String(rowex.whatsappaskev || rowex.Whatsappaskev || '0').trim();
+      const mwhatsapp = String(rowex.mwhatsapp || rowex.MWhatsApp || '0').trim();
+      const whatsappaskev_token = String(rowex.whatsappaskev_token || rowex.Whatsappaskev_token || rowex.WHATSAPPASKEV_TOKEN || rowex.whatsappaskevtoken || rowex.token || '').trim();
 
       writeLog(\`Processing Hotel: \${Whatsapp_hotelcode} (\${smsCompany}) [Biz: \${whatsappbusiness}, Askeva: \${whatsappaskev}, MWhatsApp: \${mwhatsapp}]\`, 'INFO');
 
       let dbhandlein = null;
       try {
         dbhandlein = await connectDb(myServerin, myDBin, myUserin, myPassin, odbcDriver);
+
+        // Ensure opening balance record for today for this hotel across all modes
+        try {
+          const checkRows = await dbhandlein.query('SELECT COUNT(*) AS cnt FROM whatsappcount_opening WHERE hotel_code = \'' + Whatsapp_hotelcode + '\' AND CAST(opdate AS date) = \'' + today + '\'').catch(() => []);
+          const cnt = (checkRows && checkRows[0] && checkRows[0].cnt != null) ? checkRows[0].cnt : 0;
+          if (cnt === 0) {
+            const latestRows = await dbhandlein.query('SELECT TOP 1 opbal, clbal, opdate, hotel_code, property_name FROM whatsappcount_opening WHERE hotel_code = \'' + Whatsapp_hotelcode + '\' AND CAST(opdate AS date) < \'' + today + '\' ORDER BY opdate DESC').catch(() => []);
+            const rowLatest = (latestRows && latestRows[0]) ? latestRows[0] : null;
+            if (rowLatest) {
+              await dbhandlein.query('INSERT INTO whatsappcount_opening (opbal, clbal, opdate, todate, hotel_code, property_name) VALUES (\'' + rowLatest.opbal + '\', \'' + rowLatest.clbal + '\', \'' + today + '\', \'' + today + '\', \'' + Whatsapp_hotelcode + '\', \'' + rowLatest.property_name + '\')').catch(() => {});
+            } else {
+              await dbhandlein.query('INSERT INTO whatsappcount_opening (opbal, clbal, opdate, todate, hotel_code, property_name) VALUES (1000, 1000, \'' + today + '\', \'' + today + '\', \'' + Whatsapp_hotelcode + '\', \'' + Whatsapp_hotelcode + '\')').catch(() => {});
+            }
+          }
+          await dbhandlein.query('UPDATE whatsappcount_opening SET clbal = 1000 WHERE hotel_code = \'' + Whatsapp_hotelcode + '\' AND CAST(opdate AS date) = \'' + today + '\' AND ISNULL(clbal, 0) <= 0').catch(() => {});
+        } catch (opInitErr: any) {
+          writeLog('Opening balance init error for ' + Whatsapp_hotelcode + ': ' + (opInitErr.message || ''), 'WARN');
+        }
 
         // 1. AISensy Mode
         if (whatsappbusiness === "1" && whatsappflag === "0" && whatsappaskev === "0" && mwhatsapp === "0") {
@@ -1830,25 +1851,41 @@ async function runSyncCycle() {
               const payload = {
                 template: templatename,
                 mobile: mobnew,
-                parameters: templateParams
+                parameters: templateParams,
+                token: whatsappaskev_token,
+                apiKey: whatsappaskev_token
               };
 
               try {
-                const res = await httpPostJson(\`https://waapi.hotelierhms.com/v1/message/send-message?token=\${whatsappaskev_token}\`, payload);
+                const res = await httpPostJson(\`https://waapi.hotelierhms.com/v1/message/send-message?token=\${whatsappaskev_token}\`, payload, {
+                  'Authorization': \`Bearer \${whatsappaskev_token}\`,
+                  'token': whatsappaskev_token,
+                  'apikey': whatsappaskev_token
+                });
                 const nowIso = new Date().toISOString().replace('T', ' ').substring(0, 19);
-                const data = JSON.parse(res.body || '{}');
+                let data: any = {};
+                try {
+                  data = JSON.parse(res.body || '{}');
+                } catch (jsonErr) {
+                  data = { success: false, message: res.body || 'Invalid JSON response from Askeva' };
+                }
 
                 if (data.success === true) {
                   writeLog(\`Askeva Sent successfully for msgid \${rowob.msgid}\`, 'INFO');
                   await dbhandlein.query(\`Update outbox set whatsappsmsflg='1',notsentflag='0',reason='Success',pmsreason ='Message Sent',APIPushdatetime='\${today}',APIResponsedatetime='\${nowIso}' where msgid='\${rowob.msgid}'\`).catch(() => {});
                   await dbhandlein.query(\`update whatsappcount_opening set clbal = isnull(clbal,0)-1 where opdate = '\${today}' and hotel_code ='\${Whatsapp_hotelcode}' and isnull(clbal,0) > 0\`).catch(() => {});
                 } else {
-                  const errRps = data.message || res.body;
+                  let errRps = data.message || data.error || res.body || 'Failed';
+                  if (typeof errRps === 'object') errRps = JSON.stringify(errRps);
+                  const cleanErrRps = String(errRps).replace(/'/g, "''");
                   writeLog(\`Askeva Failed for msgid \${rowob.msgid}: \${errRps}\`, 'WARN');
-                  await dbhandlein.query(\`Update outbox set whatsappsmsflg='1',notsentflag='1',reason= '\${errRps}',pmsreason ='',APIPushdatetime='\${today}',APIResponsedatetime='\${nowIso}' where msgid='\${rowob.msgid}'\`).catch(() => {});
+                  await dbhandlein.query(\`Update outbox set whatsappsmsflg='1',notsentflag='1',reason= '\${cleanErrRps}',pmsreason ='',APIPushdatetime='\${today}',APIResponsedatetime='\${nowIso}' where msgid='\${rowob.msgid}'\`).catch(() => {});
                 }
-              } catch (e) {
+              } catch (e: any) {
                 writeLog(\`Askeva Error: \${e.message}\`, 'ERROR');
+                const nowIso = new Date().toISOString().replace('T', ' ').substring(0, 19);
+                const errClean = String(e.message || 'Request Error').replace(/'/g, "''");
+                await dbhandlein.query(\`Update outbox set whatsappsmsflg='1',notsentflag='1',apiresnotsent=1,reason='\${errClean}',APIPushdatetime='\${today}',APIResponsedatetime='\${nowIso}' where msgid='\${rowob.msgid}'\`).catch(() => {});
               }
             }
           }
