@@ -1559,18 +1559,18 @@ async function runSyncCycle() {
 
         // Ensure opening balance record for today for this hotel across all modes
         try {
-          const checkRows = await dbhandlein.query('SELECT COUNT(*) AS cnt FROM whatsappcount_opening WHERE hotel_code = \'' + Whatsapp_hotelcode + '\' AND CAST(opdate AS date) = \'' + today + '\'').catch(() => []);
+          const checkRows = await dbhandlein.query(\`SELECT COUNT(*) AS cnt FROM whatsappcount_opening WHERE hotel_code = '\${Whatsapp_hotelcode}' AND CAST(opdate AS date) = '\${today}'\`).catch(() => []);
           const cnt = (checkRows && checkRows[0] && checkRows[0].cnt != null) ? checkRows[0].cnt : 0;
           if (cnt === 0) {
-            const latestRows = await dbhandlein.query('SELECT TOP 1 opbal, clbal, opdate, hotel_code, property_name FROM whatsappcount_opening WHERE hotel_code = \'' + Whatsapp_hotelcode + '\' AND CAST(opdate AS date) < \'' + today + '\' ORDER BY opdate DESC').catch(() => []);
+            const latestRows = await dbhandlein.query(\`SELECT TOP 1 opbal, clbal, opdate, hotel_code, property_name FROM whatsappcount_opening WHERE hotel_code = '\${Whatsapp_hotelcode}' AND CAST(opdate AS date) < '\${today}' ORDER BY opdate DESC\`).catch(() => []);
             const rowLatest = (latestRows && latestRows[0]) ? latestRows[0] : null;
             if (rowLatest) {
-              await dbhandlein.query('INSERT INTO whatsappcount_opening (opbal, clbal, opdate, todate, hotel_code, property_name) VALUES (\'' + rowLatest.opbal + '\', \'' + rowLatest.clbal + '\', \'' + today + '\', \'' + today + '\', \'' + Whatsapp_hotelcode + '\', \'' + rowLatest.property_name + '\')').catch(() => {});
+              await dbhandlein.query(\`INSERT INTO whatsappcount_opening (opbal, clbal, opdate, todate, hotel_code, property_name) VALUES ('\${rowLatest.opbal}', '\${rowLatest.clbal}', '\${today}', '\${today}', '\${Whatsapp_hotelcode}', '\${rowLatest.property_name}')\`).catch(() => {});
             } else {
-              await dbhandlein.query('INSERT INTO whatsappcount_opening (opbal, clbal, opdate, todate, hotel_code, property_name) VALUES (1000, 1000, \'' + today + '\', \'' + today + '\', \'' + Whatsapp_hotelcode + '\', \'' + Whatsapp_hotelcode + '\')').catch(() => {});
+              await dbhandlein.query(\`INSERT INTO whatsappcount_opening (opbal, clbal, opdate, todate, hotel_code, property_name) VALUES (1000, 1000, '\${today}', '\${today}', '\${Whatsapp_hotelcode}', '\${Whatsapp_hotelcode}')\`).catch(() => {});
             }
           }
-          await dbhandlein.query('UPDATE whatsappcount_opening SET clbal = 1000 WHERE hotel_code = \'' + Whatsapp_hotelcode + '\' AND CAST(opdate AS date) = \'' + today + '\' AND ISNULL(clbal, 0) <= 0').catch(() => {});
+          await dbhandlein.query(\`UPDATE whatsappcount_opening SET clbal = 1000 WHERE hotel_code = '\${Whatsapp_hotelcode}' AND CAST(opdate AS date) = '\${today}' AND ISNULL(clbal, 0) <= 0\`).catch(() => {});
         } catch (opInitErr: any) {
           writeLog('Opening balance init error for ' + Whatsapp_hotelcode + ': ' + (opInitErr.message || ''), 'WARN');
         }
@@ -1849,18 +1849,29 @@ async function runSyncCycle() {
 
             if (clbal > 0) {
               const payload = {
-                template: templatename,
-                mobile: mobnew,
-                parameters: templateParams,
-                token: whatsappaskev_token,
-                apiKey: whatsappaskev_token
+                to: mobnew,
+                type: "template",
+                template: {
+                  language: {
+                    policy: "deterministic",
+                    code: "en"
+                  },
+                  name: templatename,
+                  components: [
+                    {
+                      type: "body",
+                      parameters: templateParams.map(param => ({
+                        type: "text",
+                        text: String(param)
+                      }))
+                    }
+                  ]
+                }
               };
 
               try {
-                const res = await httpPostJson(\`https://waapi.hotelierhms.com/v1/message/send-message?token=\${whatsappaskev_token}\`, payload, {
-                  'Authorization': \`Bearer \${whatsappaskev_token}\`,
-                  'token': whatsappaskev_token,
-                  'apikey': whatsappaskev_token
+                const res = await httpPostJson(\`https://waapi.hotelierhms.com/v1/message/send-message?token=\${whatsappaskev_token.trim()}\`, payload, {
+                  'Content-Type': 'application/json'
                 });
                 const nowIso = new Date().toISOString().replace('T', ' ').substring(0, 19);
                 let data: any = {};
@@ -1870,9 +1881,10 @@ async function runSyncCycle() {
                   data = { success: false, message: res.body || 'Invalid JSON response from Askeva' };
                 }
 
-                if (data.success === true) {
-                  writeLog(\`Askeva Sent successfully for msgid \${rowob.msgid}\`, 'INFO');
-                  await dbhandlein.query(\`Update outbox set whatsappsmsflg='1',notsentflag='0',reason='Success',pmsreason ='Message Sent',APIPushdatetime='\${today}',APIResponsedatetime='\${nowIso}' where msgid='\${rowob.msgid}'\`).catch(() => {});
+                if ((data.messages && data.messages[0] && data.messages[0].id) || data.success === true) {
+                  const messageId = (data.messages && data.messages[0] && data.messages[0].id) || 'Success';
+                  writeLog(\`Askeva Sent successfully for msgid \${rowob.msgid} (ID: \${messageId})\`, 'INFO');
+                  await dbhandlein.query(\`Update outbox set whatsappsmsflg='1',notsentflag='0',reason='\${messageId}',pmsreason ='Message Sent',APIPushdatetime='\${today}',APIResponsedatetime='\${nowIso}' where msgid='\${rowob.msgid}'\`).catch(() => {});
                   await dbhandlein.query(\`update whatsappcount_opening set clbal = isnull(clbal,0)-1 where opdate = '\${today}' and hotel_code ='\${Whatsapp_hotelcode}' and isnull(clbal,0) > 0\`).catch(() => {});
                 } else {
                   let errRps = data.message || data.error || res.body || 'Failed';
