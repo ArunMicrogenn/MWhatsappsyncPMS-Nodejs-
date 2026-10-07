@@ -40,7 +40,14 @@ export default function App() {
     onFailure: 'restart',
     delaySeconds: '10',
     dependencies: 'MSSQLSERVER',
-    odbcDriver: '{SQL Server Native Client 11.0}'
+    odbcDriver: '{SQL Server Native Client 11.0}',
+    mediaUploadType: 'vps',
+    enableVpsUpload: true,
+    vpsHost: 'http://your-vps-ip:5000',
+    vpsUploadEndpoint: '/api/upload-pdf',
+    vpsApiKey: '',
+    vpsPublicUrl: '',
+    vpsImageFormat: 'png'
   });
 
   const [files, setFiles] = useState<GeneratedFiles | null>(null);

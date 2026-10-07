@@ -31,6 +31,14 @@ export interface ServiceConfig {
   dependencies: string;
   generateHealthCheck?: boolean;
   odbcDriver?: string;
+  // VPS Media / Image Upload for AISensy
+  mediaUploadType?: 'vps' | 's3' | 'none';
+  enableVpsUpload?: boolean;
+  vpsHost?: string;
+  vpsUploadEndpoint?: string;
+  vpsApiKey?: string;
+  vpsPublicUrl?: string;
+  vpsImageFormat?: 'png' | 'jpg';
 }
 
 export interface GeneratedFiles {
@@ -44,6 +52,9 @@ export interface GeneratedFiles {
   "run-hidden.vbs"?: string;
   "whatsapp-daemon.js"?: string;
   "whatsapp-daemon.php"?: string;
+  "vps-server.js"?: string;
+  "vps-upload.php"?: string;
+  "setup-vps.sh"?: string;
   "package.json"?: string;
   "install-node-windows.js"?: string;
   "uninstall-node-windows.js"?: string;

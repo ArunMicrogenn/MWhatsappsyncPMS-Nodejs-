@@ -116,7 +116,15 @@ app.post("/api/generate-wrapper", (req, res) => {
       delaySeconds = "10",
       dependencies = "",
       generateHealthCheck = false,
-      odbcDriver = "{SQL Server Native Client 11.0}"
+      odbcDriver = "{SQL Server Native Client 11.0}",
+      // VPS Media Server & PDF-to-Image Settings for AISensy
+      mediaUploadType = "vps",
+      enableVpsUpload = true,
+      vpsHost = "http://your-vps-ip:5000",
+      vpsUploadEndpoint = "/api/upload-pdf",
+      vpsApiKey = "",
+      vpsPublicUrl = "",
+      vpsImageFormat = "png"
     } = req.body;
 
     const isNode = runtime === "node";
@@ -1328,6 +1336,71 @@ async function httpPostJson(urlStr, data, headers = {}) {
   });
 }
 
+// Helper: Copy local PDF to VPS and receive converted Image URL for AISensy
+async function copyPdfToVpsAndGetImageUrl(filePath, hotelCode, billNo) {
+  const vpsHost = "${(vpsHost || 'http://your-vps-ip:5000').replace(/\/$/, '')}";
+  const vpsEndpoint = "${vpsUploadEndpoint || '/api/upload-pdf'}";
+  const vpsApiKey = "${vpsApiKey || ''}";
+  const vpsPublicBase = "${(vpsPublicUrl || '').replace(/\/$/, '')}";
+  const imageFormat = "${vpsImageFormat || 'png'}";
+
+  if (!fs.existsSync(filePath)) {
+    writeLog(\`[VPS] Local PDF file not found: \${filePath}\`, 'WARN');
+    return null;
+  }
+
+  try {
+    const fileBuffer = fs.readFileSync(filePath);
+    const base64Data = fileBuffer.toString('base64');
+    const filename = path.basename(filePath, path.extname(filePath));
+    
+    const postPayload = {
+      hotelCode: hotelCode,
+      filename: filename,
+      billNo: billNo || filename,
+      format: imageFormat,
+      pdfBase64: base64Data
+    };
+
+    const targetUrl = \`\${vpsHost}\${vpsEndpoint.startsWith('/') ? vpsEndpoint : '/' + vpsEndpoint}\`;
+    writeLog(\`[VPS] Copying local PDF \${filename}.pdf (\${Math.round(fileBuffer.length / 1024)} KB) to VPS: \${targetUrl}...\`, 'INFO');
+
+    const headers = {
+      'Content-Type': 'application/json'
+    };
+    if (vpsApiKey) {
+      headers['Authorization'] = \`Bearer \${vpsApiKey}\`;
+      headers['x-api-key'] = vpsApiKey;
+    }
+
+    const response = await httpPostJson(targetUrl, postPayload, headers);
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      let respData = {};
+      try {
+        respData = JSON.parse(response.body || '{}');
+      } catch (e) {
+        respData = { imageUrl: response.body };
+      }
+
+      const imageUrl = respData.imageUrl || respData.url || (vpsPublicBase ? \`\${vpsPublicBase}/\${hotelCode}/\${filename}.\${imageFormat}\` : \`\${vpsHost}/images/\${hotelCode}/\${filename}.\${imageFormat}\`);
+      writeLog(\`[VPS] Successfully converted PDF to Image URL: \${imageUrl}\`, 'INFO');
+      return imageUrl;
+    } else {
+      writeLog(\`[VPS] Failed to upload PDF. HTTP \${response.statusCode}: \${response.body}\`, 'WARN');
+      if (vpsPublicBase) {
+        return \`\${vpsPublicBase}/\${hotelCode}/\${filename}.\${imageFormat}\`;
+      }
+      return null;
+    }
+  } catch (err) {
+    writeLog(\`[VPS] Upload exception for \${filePath}: \${err.message}\`, 'WARN');
+    if (vpsPublicBase) {
+      return \`\${vpsPublicBase}/\${hotelCode}/\${billNo || 'bill'}.\${imageFormat}\`;
+    }
+    return null;
+  }
+}
+
 // Dual Database Driver Helper (Supports both 'mssql' and 'odbc')
 let odbc = null;
 let mssql = null;
@@ -1675,7 +1748,6 @@ async function runSyncCycle() {
               return val;
             });
 
-            ${enableCloudUpload ? `
             let mediaObj = null;
             if (clbal > 0 && file) {
               const filename = file;
@@ -1683,21 +1755,45 @@ async function runSyncCycle() {
               ${syncRecursive ? `
               targetFilePath = findFileRecursive("${localPdfPath.replace(/\\/g, '/')}", filename, "${excludeExtensions || ''}");
               ` : `
-              targetFilePath = path.join("${localPdfPath.replace(/\\/g, '\\\\')}", Whatsapp_hotelcode, \`\${filename}.pdf\`);
+              const pathInHotel = path.join("${localPdfPath.replace(/\\/g, '\\\\')}", Whatsapp_hotelcode, \`\${filename}.pdf\`);
+              const pathInRoot = path.join("${localPdfPath.replace(/\\/g, '\\\\')}", \`\${filename}.pdf\`);
+              if (fs.existsSync(pathInHotel)) {
+                targetFilePath = pathInHotel;
+              } else if (fs.existsSync(pathInRoot)) {
+                targetFilePath = pathInRoot;
+              } else {
+                targetFilePath = pathInHotel;
+              }
               `}
 
+              ${(enableVpsUpload || mediaUploadType === 'vps') ? `
+              // VPS Media Server: Copy local PDF to VPS and generate Image URL for AISensy
+              if (targetFilePath && fs.existsSync(targetFilePath)) {
+                const imageUrl = await copyPdfToVpsAndGetImageUrl(targetFilePath, Whatsapp_hotelcode, filename);
+                if (imageUrl) {
+                  mediaObj = {
+                    url: imageUrl,
+                    filename: \`\${filename}.${vpsImageFormat || 'png'}\`
+                  };
+                  writeLog(\`AISensy: Attached VPS Image URL for bill \${filename}: \${imageUrl}\`, 'INFO');
+                }
+              } else {
+                writeLog(\`AISensy: Local PDF for bill \${filename} not found at \${targetFilePath}\`, 'WARN');
+              }
+              ` : enableCloudUpload ? `
               if (targetFilePath && fs.existsSync(targetFilePath)) {
                 const ext = path.extname(targetFilePath).replace(/^\\./, '') || 'pdf';
                 const objectKey = \`\${Whatsapp_hotelcode}/\${filename}.\${ext}\`;
                 const uploadedUrl = await uploadToS3(targetFilePath, objectKey);
                 if (uploadedUrl) {
                   mediaObj = { url: uploadedUrl, filename: \`\${filename}.\${ext}\` };
+                  writeLog(\`AISensy: Attached S3 Media URL for bill \${filename}: \${uploadedUrl}\`, 'INFO');
                 }
               }
+              ` : `
+              // Media upload disabled
+              `}
             }
-            ` : `
-            let mediaObj = null;
-            `}
 
             if (clbal > 0) {
               const payload = {
@@ -2314,6 +2410,217 @@ IF %ERRORLEVEL% EQU 0 (
 pause
 `;
 
+    // 9. VPS Media Server & PDF-to-Image Converter (Node.js)
+    const vpsServerCode = `/**
+ * VPS Media Server & PDF-to-Image Converter for WhatsApp AISensy
+ * Runs on your Linux / Windows VPS (e.g. port 5000)
+ *
+ * Setup on Linux (Ubuntu/Debian):
+ *   sudo apt update && sudo apt install -y poppler-utils
+ *   npm install express
+ *   node vps-server.js
+ */
+
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const { exec } = require('child_process');
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+const API_KEY = process.env.VPS_API_KEY || "${vpsApiKey || ''}";
+
+// Support large PDF payloads up to 50MB
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Directories for storing incoming PDFs and rendered images
+const mediaDir = path.join(__dirname, 'media');
+const pdfsDir = path.join(mediaDir, 'pdfs');
+const imagesDir = path.join(mediaDir, 'images');
+
+[mediaDir, pdfsDir, imagesDir].forEach(d => {
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+});
+
+// Serve static images directly to WhatsApp / AISensy
+app.use('/images', express.static(imagesDir));
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'VPS Media Converter & Image Server',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Main Endpoint: Copy local PDF, render to PNG/JPG image, return public Image URL
+app.post('${vpsUploadEndpoint || '/api/upload-pdf'}', async (req, res) => {
+  try {
+    if (API_KEY) {
+      const authHeader = req.headers['authorization'] || '';
+      const token = authHeader.replace(/^Bearer\\s+/i, '').trim() || req.headers['x-api-key'];
+      if (token !== API_KEY) {
+        return res.status(401).json({ success: false, error: 'Unauthorized: Invalid VPS API Key' });
+      }
+    }
+
+    const { hotelCode = 'DEFAULT', filename = ('bill_' + Date.now()), pdfBase64, format = '${vpsImageFormat || 'png'}' } = req.body;
+    if (!pdfBase64) {
+      return res.status(400).json({ success: false, error: 'pdfBase64 is required' });
+    }
+
+    const cleanHotel = String(hotelCode).replace(/[^a-zA-Z0-9_-]/g, '') || 'DEFAULT';
+    const cleanFilename = String(filename).replace(/[^a-zA-Z0-9_-]/g, '') || ('bill_' + Date.now());
+    const isJpeg = format.toLowerCase() === 'jpg' || format.toLowerCase() === 'jpeg';
+    const cleanExt = isJpeg ? 'jpg' : 'png';
+    const popplerFmt = isJpeg ? 'jpeg' : 'png';
+
+    const hotelPdfDir = path.join(pdfsDir, cleanHotel);
+    const hotelImgDir = path.join(imagesDir, cleanHotel);
+    if (!fs.existsSync(hotelPdfDir)) fs.mkdirSync(hotelPdfDir, { recursive: true });
+    if (!fs.existsSync(hotelImgDir)) fs.mkdirSync(hotelImgDir, { recursive: true });
+
+    // 1. Write PDF file to disk
+    const pdfPath = path.join(hotelPdfDir, \`\${cleanFilename}.pdf\`);
+    fs.writeFileSync(pdfPath, Buffer.from(pdfBase64, 'base64'));
+
+    // 2. Convert first page to image using poppler pdftoppm (standard on Linux)
+    const imgPrefix = path.join(hotelImgDir, cleanFilename);
+    const finalImgPath = \`\${imgPrefix}.\${cleanExt}\`;
+    const cmd = \`pdftoppm -\${popplerFmt} -r 150 -singlefile "\${pdfPath}" "\${imgPrefix}"\`;
+
+    exec(cmd, (err, stdout, stderr) => {
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+      const host = req.headers['x-forwarded-host'] || req.headers.host || \`localhost:\${PORT}\`;
+      const publicBase = "${(vpsPublicUrl || '').replace(/\/$/, '')}";
+      const publicImageUrl = publicBase 
+        ? \`\${publicBase}/\${cleanHotel}/\${cleanFilename}.\${cleanExt}\`
+        : \`\${proto}://\${host}/images/\${cleanHotel}/\${cleanFilename}.\${cleanExt}\`;
+
+      if (err) {
+        console.warn(\`[VPS WARN] pdftoppm convert error: \${err.message}. Ensure poppler-utils is installed.\`);
+      } else {
+        console.log(\`[VPS OK] Generated image: \${finalImgPath} -> \${publicImageUrl}\`);
+      }
+
+      return res.json({
+        success: true,
+        imageUrl: publicImageUrl,
+        filename: \`\${cleanFilename}.\${cleanExt}\`,
+        hotelCode: cleanHotel
+      });
+    });
+  } catch (err) {
+    console.error('[VPS EXCEPTION]', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(\`======================================================\`);
+  console.log(\`VPS WhatsApp Media Server running on port \${PORT}\`);
+  console.log(\`Health Check: http://localhost:\${PORT}/api/health\`);
+  console.log(\`Upload API:   http://localhost:\${PORT}${vpsUploadEndpoint || '/api/upload-pdf'}\`);
+  console.log(\`Images URL:   http://localhost:\${PORT}/images/:hotelCode/:file.png\`);
+  console.log(\`======================================================\`);
+});
+`;
+
+    // 10. VPS Upload PHP Script (For Apache/Nginx web servers on VPS)
+    const vpsUploadPhpCode = `<?php
+/**
+ * Drop-in PHP Media Upload & PDF-to-Image Converter for VPS (Apache/Nginx)
+ * Save as: /var/www/html/upload-pdf.php
+ */
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, x-api-key');
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit;
+}
+
+$apiKey = "${vpsApiKey || ''}";
+if (!empty($apiKey)) {
+    $headers = getallheaders();
+    $auth = $headers['Authorization'] ?? $headers['authorization'] ?? '';
+    $token = trim(str_replace('Bearer', '', $auth));
+    if (!$token && isset($headers['x-api-key'])) $token = $headers['x-api-key'];
+    if ($token !== $apiKey) {
+        http_response_code(401);
+        echo json_encode(['success' => false, 'error' => 'Unauthorized']);
+        exit;
+    }
+}
+
+$raw = file_get_contents('php://input');
+$data = json_decode($raw, true);
+if (!$data || empty($data['pdfBase64'])) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'error' => 'Missing pdfBase64']);
+    exit;
+}
+
+$hotel = preg_replace('/[^a-zA-Z0-9_-]/', '', $data['hotelCode'] ?? 'DEFAULT');
+$filename = preg_replace('/[^a-zA-Z0-9_-]/', '', $data['filename'] ?? ('bill_' . time()));
+$format = strtolower($data['format'] ?? '${vpsImageFormat || 'png'}');
+$isJpeg = ($format === 'jpg' || $format === 'jpeg');
+$ext = $isJpeg ? 'jpg' : 'png';
+$popplerFmt = $isJpeg ? 'jpeg' : 'png';
+
+$baseDir = __DIR__ . '/media';
+$pdfDir = $baseDir . '/pdfs/' . $hotel;
+$imgDir = $baseDir . '/images/' . $hotel;
+if (!is_dir($pdfDir)) mkdir($pdfDir, 0777, true);
+if (!is_dir($imgDir)) mkdir($imgDir, 0777, true);
+
+$pdfPath = $pdfDir . '/' . $filename . '.pdf';
+file_put_contents($pdfPath, base64_decode($data['pdfBase64']));
+
+$imgPrefix = $imgDir . '/' . $filename;
+$cmd = "pdftoppm -{$popplerFmt} -r 150 -singlefile " . escapeshellarg($pdfPath) . " " . escapeshellarg($imgPrefix) . " 2>&1";
+exec($cmd, $out, $ret);
+
+$proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$host = $_SERVER['HTTP_HOST'];
+$publicBase = "${(vpsPublicUrl || '').replace(/\/$/, '')}";
+$imageUrl = $publicBase ? "{$publicBase}/{$hotel}/{$filename}.{$ext}" : "{$proto}://{$host}/media/images/{$hotel}/{$filename}.{$ext}";
+
+echo json_encode([
+    'success' => true,
+    'imageUrl' => $imageUrl,
+    'filename' => "{$filename}.{$ext}",
+    'hotelCode' => $hotel
+]);
+?>`;
+
+    // 11. VPS Setup Shell Script
+    const setupVpsShCode = `#!/bin/bash
+# ==============================================================================
+# VPS Setup for WhatsApp AISensy PDF-to-Image Media Server
+# ==============================================================================
+set -e
+echo "Updating packages..."
+sudo apt-get update -y
+echo "Installing poppler-utils (pdftoppm) and Node.js runtime..."
+sudo apt-get install -y poppler-utils nodejs npm curl
+
+mkdir -p /opt/vps-whatsapp-media/media/images
+mkdir -p /opt/vps-whatsapp-media/media/pdfs
+cd /opt/vps-whatsapp-media
+
+echo "Installing express..."
+npm init -y >/dev/null 2>&1
+npm install express >/dev/null 2>&1
+
+echo "Setup complete! Copy vps-server.js into /opt/vps-whatsapp-media and start with:"
+echo "node vps-server.js"
+`;
+
     const generatedFiles: any = {
       "winsw.xml": winswXml,
       "install-service.bat": nssmBatch,
@@ -2321,7 +2628,10 @@ pause
       "uninstall-service.bat": nssmUninstallBatch,
       "install-task-scheduler.bat": taskSchedulerBatch,
       "manage-service.ps1": psScript,
-      "README.md": readmeGuide
+      "README.md": readmeGuide,
+      "vps-server.js": vpsServerCode,
+      "vps-upload.php": vpsUploadPhpCode,
+      "setup-vps.sh": setupVpsShCode
     };
 
     if (isNode) {
@@ -2348,6 +2658,72 @@ pause
       success: true,
       files: generatedFiles
     });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// API: Test VPS Server Connectivity & PDF-to-Image Endpoint
+app.post("/api/test-vps", async (req, res) => {
+  try {
+    const {
+      vpsHost = "http://your-vps-ip:5000",
+      vpsUploadEndpoint = "/api/upload-pdf",
+      vpsApiKey = ""
+    } = req.body;
+
+    const cleanHost = (vpsHost || '').trim().replace(/\/$/, '');
+    if (!cleanHost) {
+      return res.status(400).json({ success: false, error: "VPS Host URL cannot be empty." });
+    }
+
+    const headers: Record<string, string> = {};
+    if (vpsApiKey) {
+      headers['Authorization'] = `Bearer ${vpsApiKey}`;
+      headers['x-api-key'] = vpsApiKey;
+    }
+
+    const start = Date.now();
+
+    // 1. Ping /api/health
+    try {
+      const healthResp = await fetch(`${cleanHost}/api/health`, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(6000)
+      });
+      const elapsed = Date.now() - start;
+      if (healthResp.ok) {
+        const json = await healthResp.json().catch(() => ({}));
+        return res.json({
+          success: true,
+          message: `VPS Media Server is ONLINE (${elapsed}ms)! Endpoint: ${cleanHost}${vpsUploadEndpoint}`,
+          details: json
+        });
+      }
+    } catch (e) {
+      // Continue to check root
+    }
+
+    // 2. Ping base URL
+    try {
+      const rootResp = await fetch(cleanHost, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(6000)
+      });
+      const elapsed = Date.now() - start;
+      return res.json({
+        success: true,
+        message: `VPS Host responded with HTTP ${rootResp.status} in ${elapsed}ms. Server is reachable!`,
+        statusCode: rootResp.status
+      });
+    } catch (connErr: any) {
+      return res.json({
+        success: false,
+        error: `Could not connect to VPS at ${cleanHost} (${connErr.message || 'Connection refused/timeout'}). Check host IP, port, and firewall rules.`
+      });
+    }
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

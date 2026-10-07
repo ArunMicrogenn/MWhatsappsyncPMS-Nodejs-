@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Cloud, Loader2, CheckCircle2, XCircle, HelpCircle, RotateCcw, Sliders } from 'lucide-react';
+import { Cloud, Loader2, CheckCircle2, XCircle, HelpCircle, RotateCcw, Sliders, Server, Image, Terminal, ExternalLink, ShieldCheck } from 'lucide-react';
 import { ServiceConfig } from '../types';
 
 interface S3ConnectionTesterProps {
@@ -12,6 +12,37 @@ interface S3ConnectionTesterProps {
 export function S3ConnectionTester({ config, onChange, darkMode, setShowS3Help }: S3ConnectionTesterProps) {
   const [isTestingS3, setIsTestingS3] = useState(false);
   const [s3TestResult, setS3TestResult] = useState<{ status: 'success' | 'error'; message: string } | null>(null);
+  
+  const [isTestingVps, setIsTestingVps] = useState(false);
+  const [vpsTestResult, setVpsTestResult] = useState<{ status: 'success' | 'error'; message: string } | null>(null);
+
+  const activeProvider = config.mediaUploadType || (config.enableVpsUpload ? 'vps' : config.enableCloudUpload ? 's3' : 'vps');
+
+  const testVpsConnection = async () => {
+    setIsTestingVps(true);
+    setVpsTestResult(null);
+    try {
+      const response = await fetch('/api/test-vps', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vpsHost: config.vpsHost || 'http://your-vps-ip:5000',
+          vpsUploadEndpoint: config.vpsUploadEndpoint || '/api/upload-pdf',
+          vpsApiKey: config.vpsApiKey || ''
+        })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setVpsTestResult({ status: 'success', message: data.message });
+      } else {
+        setVpsTestResult({ status: 'error', message: data.error });
+      }
+    } catch (err: any) {
+      setVpsTestResult({ status: 'error', message: err.message || 'Failed to connect to VPS.' });
+    } finally {
+      setIsTestingVps(false);
+    }
+  };
 
   const testS3Connection = async () => {
     setIsTestingS3(true);
@@ -51,51 +82,250 @@ export function S3ConnectionTester({ config, onChange, darkMode, setShowS3Help }
 
   return (
     <div className="md:col-span-2">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
         <div>
           <div className="flex items-center gap-2">
             <h3 className={`text-sm font-semibold uppercase tracking-wider flex items-center gap-2 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-              <Cloud className="w-4 h-4 text-slate-500" /> Cloud Storage PDF Upload (S3 API)
+              <Image className="w-4 h-4 text-emerald-500" /> PDF Copy & Image URL Generator for AISensy
             </h3>
             <button
               onClick={(e) => { e.preventDefault(); setShowS3Help(true); }}
               className={`flex items-center justify-center p-1 rounded-full transition-colors ${darkMode ? 'hover:bg-slate-700 text-slate-400 hover:text-indigo-400' : 'hover:bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
-              title="How to get S3 API keys"
+              title="Help & Setup Guide"
             >
               <HelpCircle className="w-4 h-4" />
             </button>
           </div>
           <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-            Automatically upload local PDFs to an S3-compatible cloud bucket (AWS S3, Cloudflare R2, DigitalOcean Spaces) to generate a public URL for AISensy.
+            Automatically copy bill PDFs from local PMS directory to your VPS or Cloud Storage, create a public image URL, and attach it to AISensy messages.
           </p>
         </div>
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => {
-               // Let's trigger the file input inside ConfigWizard
-               const fileInput = document.getElementById('env-upload-input');
-               if (fileInput) fileInput.click();
-            }}
-            className={`text-xs px-2.5 py-1.5 rounded border transition-colors flex items-center gap-1.5 ${darkMode ? 'border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300' : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600'}`}
-            title="Auto-fill credentials from a .env or AWS credentials file"
-          >
-            <Cloud className="w-3.5 h-3.5" /> Import Config
-          </button>
-          
-          <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              id="enableCloudUpload"
-              checked={Boolean(config.enableCloudUpload)}
-              onChange={(e) => handleChange('enableCloudUpload', e.target.checked)}
-              className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500"
-            />
-            <label htmlFor="enableCloudUpload" className={`text-sm ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>Enable Upload</label>
+
+        {/* Media Provider Switcher */}
+        <div className="flex items-center gap-2 shrink-0">
+          <div className={`p-1 rounded-xl border flex items-center text-xs font-medium ${darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
+            <button
+              type="button"
+              onClick={() => {
+                onChange({
+                  ...config,
+                  mediaUploadType: 'vps',
+                  enableVpsUpload: true,
+                  enableCloudUpload: false
+                });
+              }}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeProvider === 'vps'
+                  ? 'bg-emerald-600 text-white shadow-xs font-semibold'
+                  : darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Server className="w-3.5 h-3.5" />
+              VPS Server (Recommended)
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onChange({
+                  ...config,
+                  mediaUploadType: 's3',
+                  enableCloudUpload: true,
+                  enableVpsUpload: false
+                });
+              }}
+              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeProvider === 's3'
+                  ? 'bg-indigo-600 text-white shadow-xs font-semibold'
+                  : darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Cloud className="w-3.5 h-3.5" />
+              AWS S3 / Cloudflare R2
+            </button>
           </div>
         </div>
       </div>
 
-      {config.enableCloudUpload && (
+      {/* 1. VPS Media Server & PDF-to-Image Tab */}
+      {activeProvider === 'vps' && (
+        <div className={`p-4 rounded-xl border ${darkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+          <div className="flex items-center justify-between mb-3 pb-3 border-b border-slate-200 dark:border-slate-800">
+            <div className="flex items-center gap-2">
+              <Server className="w-4 h-4 text-emerald-500" />
+              <span className={`text-sm font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                VPS Configuration & PDF-to-Image Converter
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="enableVpsUpload"
+                checked={Boolean(config.enableVpsUpload ?? true)}
+                onChange={(e) => handleChange('enableVpsUpload', e.target.checked)}
+                className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500"
+              />
+              <label htmlFor="enableVpsUpload" className={`text-xs font-semibold cursor-pointer ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                Enable VPS Upload & Image Conversion
+              </label>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className={labelClass}>Local PDF Source Directory</label>
+                <input
+                  type="text"
+                  value={config.localPdfPath || ''}
+                  onChange={(e) => handleChange('localPdfPath', e.target.value)}
+                  className={getInputClass('localPdfPath', true)}
+                  placeholder="C:\ftproot\Whatsapp or C:\Bills"
+                />
+                <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                  Folder where PMS saves bills (e.g. <code>C:\ftproot\Whatsapp\[HotelCode]\[billno].pdf</code> or <code>[billno].pdf</code>).
+                </p>
+              </div>
+
+              <div className="flex flex-col justify-end pb-1">
+                <div className="flex items-center gap-2 mb-2">
+                  <input
+                    type="checkbox"
+                    id="syncRecursiveVps"
+                    checked={Boolean(config.syncRecursive)}
+                    onChange={(e) => handleChange('syncRecursive', e.target.checked)}
+                    className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500"
+                  />
+                  <label htmlFor="syncRecursiveVps" className={`text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                    Recursive Subdirectory Search
+                  </label>
+                </div>
+                {config.syncRecursive && (
+                  <div>
+                    <input
+                      type="text"
+                      value={config.excludeExtensions || ''}
+                      onChange={(e) => handleChange('excludeExtensions', e.target.value)}
+                      className={getInputClass('excludeExtensions')}
+                      placeholder="Exclude extensions (e.g. .tmp,.log)"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <label className={labelClass}>VPS Host URL (IP or Domain)</label>
+              <input
+                type="text"
+                value={config.vpsHost ?? 'http://your-vps-ip:5000'}
+                onChange={(e) => handleChange('vpsHost', e.target.value)}
+                className={getInputClass('vpsHost')}
+                placeholder="http://123.45.67.89:5000 or https://vps.hotelierhms.com"
+              />
+              <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                Address of your VPS where <code>vps-server.js</code> or <code>vps-upload.php</code> is hosted.
+              </p>
+            </div>
+
+            <div>
+              <label className={labelClass}>Upload & Convert Endpoint</label>
+              <input
+                type="text"
+                value={config.vpsUploadEndpoint ?? '/api/upload-pdf'}
+                onChange={(e) => handleChange('vpsUploadEndpoint', e.target.value)}
+                className={getInputClass('vpsUploadEndpoint')}
+                placeholder="/api/upload-pdf or /upload-pdf.php"
+              />
+              <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                Endpoint that receives the local PDF, renders it to image, and outputs public Image URL.
+              </p>
+            </div>
+
+            <div>
+              <label className={labelClass}>VPS API Key / Secret Token (Optional)</label>
+              <input
+                type="password"
+                value={config.vpsApiKey || ''}
+                onChange={(e) => handleChange('vpsApiKey', e.target.value)}
+                className={getInputClass('vpsApiKey')}
+                placeholder="Leave blank for open LAN/VPS or enter bearer token"
+              />
+            </div>
+
+            <div>
+              <label className={labelClass}>Target Image Format</label>
+              <select
+                value={config.vpsImageFormat || 'png'}
+                onChange={(e) => handleChange('vpsImageFormat', e.target.value as 'png' | 'jpg')}
+                className={getInputClass('vpsImageFormat')}
+              >
+                <option value="png" className={darkMode ? 'bg-slate-900 text-white' : ''}>PNG (High Quality, Crisp Text)</option>
+                <option value="jpg" className={darkMode ? 'bg-slate-900 text-white' : ''}>JPG / JPEG (Small File Size)</option>
+              </select>
+            </div>
+
+            <div className="md:col-span-2">
+              <label className={labelClass}>Public Image Base URL (Optional Override)</label>
+              <input
+                type="text"
+                value={config.vpsPublicUrl || ''}
+                onChange={(e) => handleChange('vpsPublicUrl', e.target.value)}
+                className={getInputClass('vpsPublicUrl')}
+                placeholder="https://media.hotelierhms.com/images (Leave blank to use VPS Host URL)"
+              />
+              <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                If behind an Nginx reverse proxy or domain, specify the public image URL prefix here.
+              </p>
+            </div>
+
+            {/* Workflow Diagram Box */}
+            <div className={`md:col-span-2 p-3 rounded-lg border text-xs flex items-start gap-2.5 ${
+              darkMode ? 'bg-emerald-950/20 border-emerald-800/40 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+            }`}>
+              <ShieldCheck className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold block mb-0.5">Automated AISensy Workflow:</span>
+                <ol className="list-decimal list-inside space-y-0.5 text-[11px] opacity-90">
+                  <li><strong>Local Read:</strong> Daemon locates <code>billno.pdf</code> in local hotel PMS directory.</li>
+                  <li><strong>VPS Transfer:</strong> Uploads PDF to VPS converter via HTTP POST.</li>
+                  <li><strong>Image Render:</strong> VPS executes <code>pdftoppm</code> to produce a crystal-clear PNG/JPG.</li>
+                  <li><strong>AISensy Push:</strong> Daemon sends AISensy payload with <code>media: &#123; url: imageUrl, filename: ... &#125;</code>.</li>
+                  <li><strong>Guest WhatsApp:</strong> Guest receives the WhatsApp message with an instant invoice image preview!</li>
+                </ol>
+              </div>
+            </div>
+
+            {/* Test VPS Button */}
+            <div className="md:col-span-2 flex flex-col sm:flex-row sm:items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={testVpsConnection}
+                disabled={isTestingVps || !config.vpsHost}
+                className={`text-xs px-3.5 py-2 rounded-lg border font-medium transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
+                  darkMode
+                    ? 'border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300'
+                    : 'border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 shadow-xs'
+                }`}
+              >
+                {isTestingVps ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Server className="w-3.5 h-3.5" />}
+                Test VPS Connection & Endpoint
+              </button>
+
+              {vpsTestResult && (
+                <div className={`text-xs flex items-center gap-1.5 font-medium ${
+                  vpsTestResult.status === 'success' ? 'text-emerald-500' : 'text-rose-500'
+                }`}>
+                  {vpsTestResult.status === 'success' ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <XCircle className="w-4 h-4 shrink-0" />}
+                  <span>{vpsTestResult.message}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. S3 / Cloudflare R2 Tab */}
+      {activeProvider === 's3' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -201,9 +431,6 @@ export function S3ConnectionTester({ config, onChange, darkMode, setShowS3Help }
               className={getInputClass('s3PublicUrl')}
               placeholder="https://pub-xxxx.r2.dev (Used if bucket is not natively public)"
             />
-            <p className={`text-[11px] mt-1.5 ${darkMode ? 'text-slate-500' : 'text-slate-500'}`}>
-              If provided, the generated URL will use this base instead of the API endpoint. E.g. Cloudflare R2 Public Dev URL.
-            </p>
           </div>
 
           <div className="md:col-span-2 p-3 rounded bg-indigo-50/50 dark:bg-indigo-500/5 border border-indigo-100 dark:border-indigo-500/20">
@@ -229,109 +456,8 @@ export function S3ConnectionTester({ config, onChange, darkMode, setShowS3Help }
                   className={getInputClass('s3PresignedExpiry')}
                   placeholder="604800"
                 />
-                <p className={`text-[11px] mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-500'}`}>
-                  Default: 604800 (7 days). Maximum is typically 7 days for AWS Signature V4.
-                </p>
               </div>
             )}
-          </div>
-
-          {/* Dedicated S3 Upload Failure & Retry Strategy Section */}
-          <div className={`md:col-span-2 p-4 rounded-xl border ${darkMode ? 'bg-slate-900/80 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <RotateCcw className="w-4 h-4 text-emerald-500" />
-                <h4 className={`text-sm font-semibold ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                  Automatic Retry & Exponential Backoff Strategy
-                </h4>
-              </div>
-              <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${
-                (config.s3MaxRetries ?? 3) > 0 
-                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' 
-                  : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-400'
-              }`}>
-                {(config.s3MaxRetries ?? 3) > 0 ? `${config.s3MaxRetries ?? 3} Retries Active` : 'Retries Disabled'}
-              </span>
-            </div>
-            
-            <p className={`text-xs mb-4 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-              Protect against transient network glitches, S3 rate limits (HTTP 503 SlowDown), and timeout spikes by automatically retrying failed PDF uploads with exponential backoff delays.
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className={labelClass}>Max Retry Attempts</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="10"
-                  value={config.s3MaxRetries ?? 3}
-                  onChange={(e) => handleChange('s3MaxRetries', Math.max(0, parseInt(e.target.value) || 0))}
-                  className={getInputClass('s3MaxRetries')}
-                  placeholder="3"
-                />
-                <span className={`text-[10px] block mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                  Default: 3 attempts (0 to disable)
-                </span>
-              </div>
-
-              <div>
-                <label className={labelClass}>Initial Backoff Delay (ms)</label>
-                <input
-                  type="number"
-                  min="100"
-                  step="100"
-                  value={config.s3InitialBackoffMs ?? 1000}
-                  onChange={(e) => handleChange('s3InitialBackoffMs', Math.max(100, parseInt(e.target.value) || 1000))}
-                  className={getInputClass('s3InitialBackoffMs')}
-                  placeholder="1000"
-                />
-                <span className={`text-[10px] block mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                  First retry delay (e.g. 1000ms = 1s)
-                </span>
-              </div>
-
-              <div>
-                <label className={labelClass}>Backoff Multiplier</label>
-                <select
-                  value={config.s3BackoffMultiplier ?? 2}
-                  onChange={(e) => handleChange('s3BackoffMultiplier', parseFloat(e.target.value) || 2)}
-                  className={getInputClass('s3BackoffMultiplier')}
-                >
-                  <option value="1.5">1.5x (Gentle growth)</option>
-                  <option value="2">2.0x (Standard exponential)</option>
-                  <option value="3">3.0x (Aggressive spacing)</option>
-                </select>
-                <span className={`text-[10px] block mt-1 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                  Multiplier per retry step
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="s3RetryBackoff"
-                  checked={config.s3RetryBackoff ?? true}
-                  onChange={(e) => handleChange('s3RetryBackoff', e.target.checked)}
-                  className="w-4 h-4 text-emerald-600 rounded focus:ring-emerald-500"
-                />
-                <label htmlFor="s3RetryBackoff" className={`text-xs font-medium cursor-pointer ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                  Enable Exponential Jitter / Backoff (Recommended)
-                </label>
-              </div>
-
-              {(config.s3MaxRetries ?? 3) > 0 && (
-                <div className={`text-[11px] font-mono ${darkMode ? 'text-emerald-400/90' : 'text-emerald-700'}`}>
-                  Delay sequence: {config.s3RetryBackoff ?? true
-                    ? Array.from({ length: Math.min(config.s3MaxRetries ?? 3, 4) })
-                        .map((_, i) => `${((config.s3InitialBackoffMs ?? 1000) * Math.pow(config.s3BackoffMultiplier ?? 2, i)) / 1000}s`)
-                        .join(' → ')
-                    : `${((config.s3InitialBackoffMs ?? 1000) / 1000)}s fixed`}
-                </div>
-              )}
-            </div>
           </div>
 
           <div className="md:col-span-2">
