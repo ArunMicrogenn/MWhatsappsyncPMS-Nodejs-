@@ -86,7 +86,7 @@ export function S3ConnectionTester({ config, onChange, darkMode, setShowS3Help }
         <div>
           <div className="flex items-center gap-2">
             <h3 className={`text-sm font-semibold uppercase tracking-wider flex items-center gap-2 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-              <Image className="w-4 h-4 text-emerald-500" /> PDF Copy & Image URL Generator for AISensy
+              <Server className="w-4 h-4 text-emerald-500" /> PDF Copy & URL Dispatch for AISensy
             </h3>
             <button
               onClick={(e) => { e.preventDefault(); setShowS3Help(true); }}
@@ -97,7 +97,7 @@ export function S3ConnectionTester({ config, onChange, darkMode, setShowS3Help }
             </button>
           </div>
           <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-            Automatically copy bill PDFs from local PMS directory to your VPS or Cloud Storage, create a public image URL, and attach it to AISensy messages.
+            Automatically copy bill PDFs from local PMS directory to your VPS, generate a direct public PDF URL, and attach it to AISensy WhatsApp messages.
           </p>
         </div>
 
@@ -284,13 +284,13 @@ export function S3ConnectionTester({ config, onChange, darkMode, setShowS3Help }
             }`}>
               <ShieldCheck className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
               <div>
-                <span className="font-semibold block mb-0.5">Automated AISensy Workflow:</span>
+                <span className="font-semibold block mb-0.5">Automated AISensy Direct PDF Workflow:</span>
                 <ol className="list-decimal list-inside space-y-0.5 text-[11px] opacity-90">
-                  <li><strong>Local Read:</strong> Daemon locates <code>billno.pdf</code> in local hotel PMS directory.</li>
-                  <li><strong>VPS Transfer:</strong> Uploads PDF to VPS converter via HTTP POST.</li>
-                  <li><strong>Image Render:</strong> VPS executes <code>pdftoppm</code> to produce a crystal-clear PNG/JPG.</li>
-                  <li><strong>AISensy Push:</strong> Daemon sends AISensy payload with <code>media: &#123; url: imageUrl, filename: ... &#125;</code>.</li>
-                  <li><strong>Guest WhatsApp:</strong> Guest receives the WhatsApp message with an instant invoice image preview!</li>
+                  <li><strong>Local Read:</strong> Daemon locates <code>billno.pdf</code> in local PMS folder.</li>
+                  <li><strong>VPS Transfer:</strong> Copies PDF directly to VPS endpoint via HTTP POST.</li>
+                  <li><strong>Instant URL:</strong> VPS saves PDF to public directory and returns public PDF URL (No image conversion needed).</li>
+                  <li><strong>AISensy Push:</strong> Daemon sends AISensy payload with <code>media: &#123; url: pdfUrl, filename: 'billno.pdf' &#125;</code>.</li>
+                  <li><strong>Guest WhatsApp:</strong> Guest receives the WhatsApp message with the authentic PDF invoice attached!</li>
                 </ol>
               </div>
             </div>
