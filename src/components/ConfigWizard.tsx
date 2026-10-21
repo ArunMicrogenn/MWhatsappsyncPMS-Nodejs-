@@ -800,15 +800,68 @@ export function ConfigWizard({ config, onChange, onGenerate, loading, darkMode }
         </div>
 
         {/* Database Configuration */}
-        <div className={`space-y-4 pt-4 border-t md:col-span-2 grid grid-cols-1 gap-6 ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
-          <div className="md:col-span-1">
+        <div className={`space-y-4 pt-4 border-t md:col-span-2 ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+          <div>
              <h3 className={`text-sm font-semibold uppercase tracking-wider flex items-center gap-2 ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-               <Terminal className="w-4 h-4 text-slate-500" /> Database Configuration
+               <Terminal className="w-4 h-4 text-emerald-500" /> SQL Server Database Configuration
              </h3>
              <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-               Set the ODBC driver string to match your SQL Server environment.
+               Configure your SQL Server instance, authentication credentials, and ODBC driver for WhatsApp synchronization.
              </p>
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className={labelClass}>SQL Server Instance</label>
+              <input
+                type="text"
+                value={config.dbServer || 'SAIHOTAL-PC\\SQLEXPRESS'}
+                onChange={(e) => handleChange('dbServer', e.target.value)}
+                className={getInputClass('dbServer', true)}
+                placeholder="SAIHOTAL-PC\SQLEXPRESS"
+              />
+              <span className={`text-[10px] mt-1 block ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                e.g. <code>SAIHOTAL-PC\SQLEXPRESS</code> or <code>127.0.0.1</code>
+              </span>
+            </div>
+
+            <div>
+              <label className={labelClass}>Database Name</label>
+              <input
+                type="text"
+                value={config.dbName || 'microgenn'}
+                onChange={(e) => handleChange('dbName', e.target.value)}
+                className={getInputClass('dbName', true)}
+                placeholder="microgenn"
+              />
+              <span className={`text-[10px] mt-1 block ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                Main config database (e.g. <code>microgenn</code>)
+              </span>
+            </div>
+
+            <div>
+              <label className={labelClass}>SQL User ID</label>
+              <input
+                type="text"
+                value={config.dbUser || 'sa'}
+                onChange={(e) => handleChange('dbUser', e.target.value)}
+                className={getInputClass('dbUser', true)}
+                placeholder="sa"
+              />
+            </div>
+
+            <div>
+              <label className={labelClass}>SQL Password</label>
+              <input
+                type="password"
+                value={config.dbPassword || 'mgenn@123'}
+                onChange={(e) => handleChange('dbPassword', e.target.value)}
+                className={getInputClass('dbPassword', true)}
+                placeholder="••••••••"
+              />
+            </div>
+          </div>
+
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className={labelClass}>ODBC Driver String</label>
@@ -828,32 +881,52 @@ export function ConfigWizard({ config, onChange, onGenerate, loading, darkMode }
                 )
               )}
             </div>
-            <input
-              type="text"
-              value={config.odbcDriver}
-              onChange={(e) => handleChange('odbcDriver', e.target.value)}
-              className={getInputClass('odbcDriver', true)}
-              placeholder="{SQL Server Native Client 11.0}"
-            />
-            {odbcVerifyResult.tested && !odbcVerifyResult.driverExists ? (
-              <div className={`mt-2 p-2.5 rounded-lg border text-xs flex items-start gap-2 ${
-                darkMode ? 'bg-rose-950/40 border-rose-800 text-rose-200' : 'bg-rose-50 border-rose-200 text-rose-800'
-              }`}>
-                <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <span className="font-bold block text-rose-600 dark:text-rose-400">
-                    Host Environment Warning: Driver not found in Windows Registry
-                  </span>
-                  <p className="text-[11px] leading-relaxed">
-                    The driver "{config.odbcDriver}" is not installed on this host. Service startup or <code>odbc_connect()</code> will fail. Check <strong>Service Simulator &gt; Environment Health Check</strong> to inspect installed drivers or install the required Microsoft ODBC Driver.
-                  </p>
-                </div>
+
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                value={config.odbcDriver}
+                onChange={(e) => handleChange('odbcDriver', e.target.value)}
+                className={getInputClass('odbcDriver', true)}
+                placeholder="{SQL Server Native Client 10.0}"
+              />
+              
+              {/* Quick Select Buttons */}
+              <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                {[
+                  '{SQL Server Native Client 10.0}',
+                  '{SQL Server}',
+                  '{SQL Server Native Client 11.0}',
+                  '{ODBC Driver 17 for SQL Server}'
+                ].map((drv) => (
+                  <button
+                    key={drv}
+                    type="button"
+                    onClick={() => handleChange('odbcDriver', drv)}
+                    className={`text-[10px] px-2 py-1.5 rounded border transition-colors cursor-pointer ${
+                      config.odbcDriver === drv
+                        ? 'bg-emerald-600 border-emerald-500 text-white font-semibold'
+                        : darkMode ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {drv.replace(/[{}]/g, '')}
+                  </button>
+                ))}
               </div>
-            ) : (
-              <p className={`text-[11px] mt-1.5 ${darkMode ? 'text-slate-500' : 'text-slate-500'}`}>
-                Common values: <code>{`{SQL Server Native Client 11.0}`}</code>, <code>{`{ODBC Driver 17 for SQL Server}`}</code>, or <code>{`{SQL Server}`}</code>
-              </p>
-            )}
+            </div>
+
+            {/* Resilient Driver Callout */}
+            <div className={`mt-3 p-3 rounded-lg border text-xs flex items-start gap-2.5 ${
+              darkMode ? 'bg-emerald-950/20 border-emerald-900/40 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+            }`}>
+              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold block">4-Layer Resilient Database Engine Active</span>
+                <p className="text-[11px] mt-0.5 leading-relaxed opacity-90">
+                  Node daemon automatically tests drivers in sequence: <strong>Pure JS mssql</strong> (fast, no compiler), <strong>Windows ODBC</strong> ({config.odbcDriver || '{SQL Server Native Client 10.0}'}), and <strong>Built-in Windows PowerShell Bridge</strong> (requires zero npm installs).
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 

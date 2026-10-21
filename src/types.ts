@@ -31,6 +31,11 @@ export interface ServiceConfig {
   dependencies: string;
   generateHealthCheck?: boolean;
   odbcDriver?: string;
+  // Database Configuration
+  dbServer?: string;
+  dbName?: string;
+  dbUser?: string;
+  dbPassword?: string;
   // VPS Media / Image Upload for AISensy
   mediaUploadType?: 'vps' | 's3' | 'none';
   enableVpsUpload?: boolean;

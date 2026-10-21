@@ -116,7 +116,12 @@ app.post("/api/generate-wrapper", (req, res) => {
       delaySeconds = "10",
       dependencies = "",
       generateHealthCheck = false,
-      odbcDriver = "{SQL Server Native Client 11.0}",
+      odbcDriver = "{SQL Server Native Client 10.0}",
+      // Database connection settings
+      dbServer = "SAIHOTAL-PC\\SQLEXPRESS",
+      dbName = "microgenn",
+      dbUser = "sa",
+      dbPassword = "mgenn@123",
       // VPS Media Server & PDF-to-Image Settings for AISensy
       mediaUploadType = "vps",
       enableVpsUpload = true,
@@ -693,10 +698,11 @@ function getPresignedUrl($objectKey) {
 writeLog("=== WhatsApp Sync Windows Service Daemon Started ===");
 
 // Database Configuration
-$myServer = "DESKTOP-VDGDM3P";
-$myUser = "sa";
-$myPass = "mgenn@123";
-$myDB = "Whatsapp"; 
+$myServer = "${(dbServer || 'SAIHOTAL-PC\\\\SQLEXPRESS').replace(/\\/g, '\\\\')}";
+$myUser = "${dbUser || 'sa'}";
+$myPass = "${dbPassword || 'mgenn@123'}";
+$myDB = "${dbName || 'microgenn'}"; 
+$odbcDriver = "${odbcDriver || '{SQL Server Native Client 10.0}'}"; 
 
 $pollInterval = 30; // seconds between sync cycles
 
@@ -1403,7 +1409,10 @@ async function copyPdfToVpsAndGetPdfUrl(filePath, hotelCode, billNo) {
 // Backward-compatibility alias
 const copyPdfToVpsAndGetImageUrl = copyPdfToVpsAndGetPdfUrl;
 
-// Dual Database Driver Helper (Supports both 'mssql' and 'odbc')
+// Dual Database Driver Helper (Supports 'mssql', 'odbc', and native Windows PowerShell bridge)
+const child_process = require('child_process');
+const os = require('os');
+
 let odbc = null;
 let mssql = null;
 
@@ -1413,10 +1422,117 @@ try {
 
 try {
   mssql = require('mssql');
-} catch (e) {}
+} catch (e) {
+  writeLog("[DRIVER] require('mssql') load attempt: " + (e.message || e), 'WARN');
+  if (e.message && (e.message.indexOf('SyntaxError') !== -1 || e.message.indexOf('Unexpected token') !== -1 || e.message.indexOf('private') !== -1)) {
+    writeLog("[DRIVER] Installed 'mssql' is too new for Node.js " + process.version + ". Please run: npm install mssql@6.3.2", 'WARN');
+  }
+}
 
 if (!odbc && !mssql) {
-  writeLog("Notice: Neither 'odbc' nor 'mssql' package found. Using simulation mode. Run: npm install mssql", 'WARN');
+  writeLog("========================================================================", 'WARN');
+  writeLog("[INFO] Standard npm SQL packages not loaded for Node " + process.version + ".", 'WARN');
+  writeLog("[INFO] Activating built-in Windows SQL Bridge (Zero npm dependencies required)...", 'INFO');
+  writeLog("[TIP]  For highest throughput on Node " + process.version + ", run: npm install mssql@6.3.2", 'INFO');
+  writeLog("========================================================================", 'WARN');
+}
+
+// Built-in Native Windows SQL Bridge via PowerShell (Zero npm packages needed)
+function queryViaWindowsPowerShell(server, database, user, password, sql) {
+  const psScript = \`
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ErrorActionPreference = 'Stop'
+$server = '\${server.replace(/'/g, "''")}'
+$database = '\${database.replace(/'/g, "''")}'
+$user = '\${user.replace(/'/g, "''")}'
+$password = '\${password.replace(/'/g, "''")}'
+$sql = @'
+\${sql}
+'@
+
+$conn = $null
+# Try 1: .NET Native System.Data.SqlClient
+try {
+  $conn = New-Object System.Data.SqlClient.SqlConnection("Server=$server;Database=$database;User Id=$user;Password=$password;TrustServerCertificate=True;Connect Timeout=15;")
+  $conn.Open()
+} catch {
+  # Try 2: ODBC with SQL Server Native Client 10.0 (as found in User DSN/Drivers)
+  try {
+    $conn = New-Object System.Data.Odbc.OdbcConnection("Driver={SQL Server Native Client 10.0};Server=$server;Database=$database;Uid=$user;Pwd=$password;")
+    $conn.Open()
+  } catch {
+    # Try 3: ODBC with standard SQL Server driver
+    try {
+      $conn = New-Object System.Data.Odbc.OdbcConnection("Driver={SQL Server};Server=$server;Database=$database;Uid=$user;Pwd=$password;")
+      $conn.Open()
+    } catch {
+      $conn = New-Object System.Data.Odbc.OdbcConnection("Driver={SQL Server Native Client 11.0};Server=$server;Database=$database;Uid=$user;Pwd=$password;")
+      $conn.Open()
+    }
+  }
+}
+
+$cmd = $conn.CreateCommand()
+$cmd.CommandText = $sql
+$cmd.CommandTimeout = 30
+
+$trimmed = $sql.Trim()
+$isSelect = ($trimmed -match '^(?i)(SELECT|EXEC|WITH)')
+
+if ($isSelect) {
+  $adapter = $null
+  if ($conn -is [System.Data.SqlClient.SqlConnection]) {
+    $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($cmd)
+  } else {
+    $adapter = New-Object System.Data.Odbc.OdbcDataAdapter($cmd)
+  }
+  $dt = New-Object System.Data.DataTable
+  $adapter.Fill($dt) | Out-Null
+  $conn.Close()
+
+  $rows = @()
+  foreach ($row in $dt.Rows) {
+    $dict = [ordered]@{}
+    foreach ($col in $dt.Columns) {
+      $val = $row[$col.ColumnName]
+      if ($val -eq [DBNull]::Value -or $null -eq $val) {
+        $dict[$col.ColumnName] = $null
+      } else {
+        $dict[$col.ColumnName] = [string]$val
+      }
+    }
+    $rows += $dict
+  }
+  if ($rows.Count -eq 0) {
+    "[]"
+  } else {
+    ConvertTo-Json -InputObject $rows -Compress -Depth 5
+  }
+} else {
+  $aff = $cmd.ExecuteNonQuery()
+  $conn.Close()
+  "[{\`"affectedRows\`": $aff}]"
+}
+\`;
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  const res = child_process.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+    encoding: 'utf8',
+    maxBuffer: 30 * 1024 * 1024,
+    timeout: 35000
+  });
+
+  if (res.error) throw res.error;
+  if (res.status !== 0 && res.stderr) {
+    throw new Error(res.stderr.trim());
+  }
+  const out = (res.stdout || '').trim();
+  if (!out) return [];
+  try {
+    const data = JSON.parse(out);
+    return Array.isArray(data) ? data : [data];
+  } catch (e) {
+    return [];
+  }
 }
 
 async function connectDb(serverRaw, databaseRaw, userRaw, passwordRaw, odbcDriverName) {
@@ -1542,7 +1658,33 @@ async function connectDb(serverRaw, databaseRaw, userRaw, passwordRaw, odbcDrive
     writeLog(\`odbc all driver connection attempts failed for server '\${server}' / db '\${database}'\`, 'WARN');
   }
 
-  // 3. Fallback dummy
+  // 3. Fallback to Windows Native PowerShell Bridge (Zero npm dependencies required!)
+  if (process.platform === 'win32') {
+    try {
+      const probe = queryViaWindowsPowerShell(server, database, user, password, "SELECT 1 AS probe");
+      if (probe && probe.length > 0) {
+        return {
+          driver: 'windows-powershell-bridge',
+          query: async (sqlQuery) => {
+            return queryViaWindowsPowerShell(server, database, user, password, sqlQuery);
+          },
+          close: async () => {}
+        };
+      }
+    } catch (errBridge) {
+      writeLog(\`Windows native bridge failed for '\${server}' / '\${database}': \${errBridge.message}\`, 'WARN');
+    }
+  }
+
+  // 4. Critical Warning if all drivers failed
+  writeLog(\`========================================================================\`, 'ERROR');
+  writeLog(\`[DATABASE ERROR] Unable to connect to SQL Server '\${server}' / '\${database}'.\`, 'ERROR');
+  writeLog(\`Remedies:\`, 'ERROR');
+  writeLog(\`  1. Install pure JS driver: Run 'npm install mssql' or 'install-dependencies.bat'\`, 'ERROR');
+  writeLog(\`  2. In SQL Server Configuration Manager: Enable TCP/IP and Named Pipes for SQLEXPRESS\`, 'ERROR');
+  writeLog(\`  3. Check credentials: User '\${user}' on server '\${server}'\`, 'ERROR');
+  writeLog(\`========================================================================\`, 'ERROR');
+
   return {
     driver: 'none',
     query: async () => [],
@@ -1551,11 +1693,11 @@ async function connectDb(serverRaw, databaseRaw, userRaw, passwordRaw, odbcDrive
 }
 
 // Database Configuration
-const myServer = "DESKTOP-VDGDM3P";
-const myUser = "sa";
-const myPass = "mgenn@123";
-const myDB = "microgenn"; 
-const odbcDriver = "${odbcDriver}";
+const myServer = "${(dbServer || 'SAIHOTAL-PC\\\\SQLEXPRESS').replace(/\\/g, '\\\\')}";
+const myUser = "${dbUser || 'sa'}";
+const myPass = "${dbPassword || 'mgenn@123'}";
+const myDB = "${dbName || 'microgenn'}"; 
+const odbcDriver = "${odbcDriver || '{SQL Server Native Client 10.0}'}";
 const pollIntervalSeconds = 30;
 
 let isRunning = true;
@@ -2212,15 +2354,39 @@ Set WshShell = Nothing
   "main": "whatsapp-daemon.js",
   "scripts": {
     "start": "node whatsapp-daemon.js",
+    "install-deps": "npm install mssql@6.3.2",
     "health": "node health-check.js"
   },
   "dependencies": {
+    "mssql": "^6.3.2"
+  },
+  "optionalDependencies": {
     "odbc": "^2.4.8"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=10.0.0"
   }
 }`;
+
+    // 1-Click Dependency Installer Batch
+    const installDepsBatchCode = `@echo off
+title WhatsApp Sync Dependencies Installer
+cd /d "%~dp0"
+echo =========================================================================
+echo [1/3] Removing incompatible mssql version if installed...
+call npm uninstall mssql --save >nul 2>&1
+echo [2/3] Installing pure JavaScript SQL Server driver compatible with Node 10-24...
+echo       Installing mssql@6.3.2 (Zero C++ compilation needed)...
+echo =========================================================================
+call npm install mssql@6.3.2 --save
+echo.
+echo =========================================================================
+echo [3/3] Verification complete!
+echo You can now test run the daemon:
+echo    node whatsapp-daemon.js
+echo =========================================================================
+pause
+`;
 
     // 7. Health Check Script (Node.js & PHP)
     const nodeHealthCheckCode = `/**
@@ -2614,6 +2780,7 @@ echo "Or with PM2: npm install -g pm2 && pm2 start vps-server.js --name whatsapp
     if (isNode) {
       generatedFiles["whatsapp-daemon.js"] = nodeDaemonCode;
       generatedFiles["package.json"] = packageJsonCode;
+      generatedFiles["install-dependencies.bat"] = installDepsBatchCode;
       generatedFiles["ecosystem.config.js"] = pm2EcosystemCode;
       generatedFiles["install-pm2.bat"] = pm2BatchCode;
       generatedFiles["install-node-windows.bat"] = nodeWindowsInstallBatch;

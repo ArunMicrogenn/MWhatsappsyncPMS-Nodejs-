@@ -47,6 +47,7 @@ export function CodeViewer({ files, serviceName, darkMode }: CodeViewerProps) {
     "vps-upload.php": { name: "VPS Upload Script (.php)", icon: "🌐" },
     "setup-vps.sh": { name: "VPS Setup Script (.sh)", icon: "🐧" },
     "package.json": { name: "package.json", icon: "📦" },
+    "install-dependencies.bat": { name: "Install Dependencies (.bat)", icon: "📥" },
     "manage-service.ps1": { name: "PowerShell Manager", icon: "⚙️" },
     "README.md": { name: "Installation Guide", icon: "📖" },
     "health-check.js": { name: "Health Check (Node.js)", icon: "🩺" },
